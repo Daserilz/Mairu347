@@ -1,21 +1,22 @@
-using Unity.Collections;
+using TMPro;
 using Unity.Netcode;
 using UnityEngine;
 
 [RequireComponent(typeof(SphereCollider))]
 public class Item : Identity
 {
-    private const float COLLECT_COOLDOWN_TIME = 2f;
-
-    private readonly NetworkVariable<bool> _isCollectable = new NetworkVariable<bool>(
-        true, // Default: collectable
-        NetworkVariableReadPermission.Everyone,
-        NetworkVariableWritePermission.Server
-    );
+    public ItemSO item;
+    public NetworkVariable<int> amount = new NetworkVariable<int>(1,
+    NetworkVariableReadPermission.Everyone, NetworkVariableWritePermission.Server);
+    public TextMeshProUGUI amountText;
     private Collider _collider;
-    protected Collider itemcollider {
-        get {
-            if (_collider == null) {
+
+    protected Collider itemcollider
+    {
+        get
+        {
+            if (_collider == null)
+            {
                 _collider = GetComponent<Collider>();
                 _collider.isTrigger = true;
             }
@@ -23,134 +24,132 @@ public class Item : Identity
         }
     }
 
+
     public override void SetUP()
     {
         base.SetUP();
         _collider = GetComponent<Collider>();
-        _collider.isTrigger = true;
+        if (_collider != null)
+        {
+            _collider.isTrigger = true;
+        }
+        this.Name = item.itemName;
     }
     public override void OnNetworkSpawn()
     {
         base.OnNetworkSpawn();
-        // Subscribe เพื่ออัปเดต Collider บนทุก Client เมื่อค่าเปลี่ยน
-        _isCollectable.OnValueChanged += OnCollectableStateChanged;
-
-        if (IsServer)
+        if (itemcollider != null)
         {
-            ApplyCollectCooldown();
+            itemcollider.enabled = true;
         }
+        if (amountText) amountText.text = amount.Value.ToString();
 
-        // ตั้งค่าสถานะเริ่มต้นของ Collider บน Client ที่เข้ามาก่อน/หลัง
-        UpdateColliderState(_isCollectable.Value);
-
+        // สับสคริบการเปลี่ยนแปลงค่า amount
+        amount.OnValueChanged += OnAmountChanged;
     }
+
     public override void OnNetworkDespawn()
     {
         base.OnNetworkDespawn();
-
         if (gameObject != null)
         {
             Destroy(gameObject);
         }
-
     }
 
-    private void ApplyCollectCooldown()
+    // ----------------------------------------------------
+    // 💣 Destruction Logic (Server Authority)
+    // ----------------------------------------------------
+    private void OnAmountChanged(int previousValue, int newValue)
+    {
+        // อัพเดต UI เมื่อค่า amount เปลี่ยนแปลง
+        if (amountText) amountText.text = newValue.ToString();
+    }
+    public void HandleDestroyed()
     {
         if (!IsServer) return;
-
-        //Server ตั้งค่าเป็น false ทันที (ซิงค์ไปยัง Client ทุกคน)
-        _isCollectable.Value = false;
-
-        Invoke(nameof(SetCollectableTrue), COLLECT_COOLDOWN_TIME);
-    }
-    private void SetCollectableTrue()
-    {
-        if (IsServer)
-        {
-            _isCollectable.Value = true;
-        }
-    }
-    private void OnCollectableStateChanged(bool oldValue, bool newValue)
-    {
-        UpdateColliderState(newValue);
-    }
-
-    private void UpdateColliderState(bool isCollectable)
-    {
-        if (itemcollider != null)
-        {
-            // เปิด/ปิด Collider ตามสถานะที่ซิงค์มา
-            itemcollider.enabled = isCollectable;
-
-            if (isCollectable)
-            {
-                Debug.Log($"[ITEM] {Name} collider enabled (Collectable).");
-            }
-        }
-    }
-    public Item() { 
-    }
-    public Item(Item item)
-    {
-        this.Name = item.Name;
+        NetworkObject.Despawn();
     }
     public void OnTriggerEnter(Collider other)
     {
-        if (other.tag == "Player") 
-        { 
-            // 2. ดึงคอมโพเนนต์ Player จาก GameObject ที่ชน
-            Player collector = other.GetComponent<Player>();
-            
-            // 3. ตรวจสอบความถูกต้องและสั่งเก็บ
-            if (collector != null)
-            {
-                RequestCollectServerRpc(collector.NetworkObject);
-            }
-        }
-    }
-    public virtual void OnCollect(Player player) 
-    { 
-        Debug.Log($"Collected {Name}");
-    }
-    public virtual void Use(Player player)
-    {
-        Debug.Log($"Using {Name}");
-    }
+        if (isOnLive.Value == false) return;
 
-    
-    // ******************************************************
-    // *** 🎯 SERVER SIDE: การตัดสินใจ (Called by Client) 🎯 ***
-    // ******************************************************
-
-    [Rpc(SendTo.Server, InvokePermission = RpcInvokePermission.Everyone)]
-    public  void RequestCollectServerRpc(NetworkObjectReference collectorNetRef)
-    {
-
-        if (!IsServer) return;
-
-        if (!collectorNetRef.TryGet(out NetworkObject collectorNetObj)) return;
-        Player collector = collectorNetObj.GetComponent<Player>();
-        
-        // 🚨 1. ตรวจสอบความถูกต้องของ Player ก่อนเรียก OnCollect
-        if (collector == null || !NetworkObject.IsSpawned) 
+        if (other.CompareTag("Player") && other.GetComponent<NetworkObject>().IsOwner)
         {
-            // ถ้าไม่ผ่านการตรวจสอบ ควรเปิด Collider คืน (ถ้ามี logic การเปิด)
-            return; 
+            GetComponent<Collider>().enabled = false;
+
+            PickupItem(other.GetComponent<NetworkObject>().OwnerClientId);
         }
-        if (!_isCollectable.Value) return;
-        // 2. Server เรียก Hook
-        OnCollect(collector); 
-
-        // 3. Server แจ้ง Log และ Despawn
-        LogCollectedClientRpc(new FixedString32Bytes(collector.Name), new FixedString32Bytes(Name));
-        NetworkObject.Despawn();
     }
 
-    [ClientRpc]
-    public virtual void LogCollectedClientRpc(FixedString32Bytes playerName, FixedString32Bytes itemName)
+    private void PickupItem(ulong playerId)
     {
-        //text editor UI
-        Debug.Log($"📢 Global Log: {playerName.ToString()} collected {itemName.ToString()}!");
+        AddItemToInventoryLocal();
+
+        if (IsServer)
+        {
+            isOnLive.Value = true;
+            NetworkObject.Despawn(true);
+        }
+        else
+        {
+            MarkAsPickedUpServerRpc();
+        }
     }
+
+    [ServerRpc(RequireOwnership = false)]
+    private void MarkAsPickedUpServerRpc()
+    {
+        if (isOnLive.Value) return;
+        isOnLive.Value = true;
+        NetworkObject.Despawn(true);
+    }
+
+    private void AddItemToInventoryLocal()
+    {
+        InventoryCanvas invCanvas = FindFirstObjectByType<InventoryCanvas>();
+        if (invCanvas != null)
+        {
+            invCanvas.AddItem(item, amount.Value);
+            Debug.Log("Local pickup: " + item.itemName + " x" + amount.Value);
+
+            // ✅ แจ้ง Quest Manager
+            if (QuestManager.Instance != null)
+            {
+                QuestManager.Instance.OnItemCollected(item);
+            }
+
+            // ปิดการแสดงผลทันที (client-side prediction)
+            gameObject.SetActive(false);
+        }
+    }
+
+    public void SetAmount(int newAmount)
+    {
+        amount.Value = newAmount;
+        if (amountText) amountText.text = amount.Value.ToString();
+    }
+
+    public void RandomAmount()
+    {
+        if (IsServer)
+        {
+            amount.Value = Random.Range(1, item.maxStack + 1);
+            if (amountText) amountText.text = amount.Value.ToString();
+        }
+        else
+        {
+            RandomAmountServerRpc();
+        }
+
+    }
+    [ServerRpc(RequireOwnership = false)]
+    private void RandomAmountServerRpc()
+    {
+        amount.Value = Random.Range(1, item.maxStack + 1);
+
+    }
+
+
+
 }

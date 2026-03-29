@@ -5,6 +5,7 @@ public class ItemData
 {
     public string Name;
     public int ItemID;
+    public Sprite sprite;
     // เพิ่มคุณสมบัติอื่นๆ เช่น Icon, Type, Value
 
     // Constructor เพื่อสร้างข้อมูลจาก Item Component
